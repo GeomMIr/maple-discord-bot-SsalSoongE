@@ -1,57 +1,67 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import math
 
-# 클래스 바깥에 두어도 되는 도우미 함수
-def format_meso(amount):
-    """메소를 억, 만 단위로 읽기 쉽게 포맷팅하는 함수"""
-    if amount == 0: return "0 메소"
-    eok = amount // 100000000
-    man = (amount % 100000000) // 10000
-    rest = amount % 10000
-    
-    res = []
-    if eok > 0: res.append(f"{eok}억")
-    if man > 0: res.append(f"{man}만")
-    if rest > 0: res.append(f"{rest}")
-    
-    return " ".join(res) + " 메소"
-
-# 여기서부터가 명령어 부품 (Cog) 클래스입니다.
 class Distribute(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # 💡 봇 객체(@bot.tree) 대신 앱 커맨드(@app_commands) 데코레이터를 사용합니다.
-    # 💡 이 함수는 반드시 class 안으로 들여쓰기 되어야 합니다.
-    @app_commands.command(name="분배", description="보스 수익을 인원수에 맞게 분배합니다.")
+    @app_commands.command(name="분배", description="보스 수익금을 파티원 수에 맞게 분배합니다.")
     @app_commands.describe(
-        people="분배할 인원수를 입력하세요 (예: 2, 6)",
-        amount="분배할 총수익(메소)을 숫자로만 입력하세요"
+        amount="분배할 총 금액 (숫자만 입력)", 
+        people="파티 인원 수", 
+        percents="(선택) 차등 분배 시 퍼센트를 띄어쓰기나 쉼표로 입력 (예: 30 30 40)"
     )
-    async def distribute(self, interaction: discord.Interaction, people: int, amount: int):
-        # 인원수 예외 처리
-        if people < 2:
-            await interaction.response.send_message("인원수는 최소 2명 이상이어야 합니다.", ephemeral=True)
-            return
+    async def split_meso(self, interaction: discord.Interaction, amount: int, people: int, percents: str = None):
+        if not percents:
+            # 1. 퍼센트 옵션이 없을 때 (기본 1/N 균등 분배)
+            per_person = amount // people
+            await interaction.response.send_message(f"💰 총 **{amount:,}** 메소를 {people}명에게 균등 분배합니다.\n👉 **1인당 {per_person:,} 메소**")
+            
+        else:
+            # 2. 퍼센트 옵션이 있을 때 (차등 분배)
+            try:
+                # 쉼표를 공백으로 바꾸고 분리 (30,30,40 이나 30 30 40 모두 지원)
+                cleaned_str = percents.replace(",", " ")
+                percent_list = [float(p.strip()) for p in cleaned_str.split() if p.strip()]
+                
+                # 입력된 퍼센트 개수와 인원수가 맞는지 확인
+                if len(percent_list) != people:
+                    return await interaction.response.send_message(
+                        f"⚠️ 인원수({people}명)와 입력한 퍼센트의 개수({len(percent_list)}개)가 일치하지 않습니다!", 
+                        ephemeral=True
+                    )
+                
+                # 합이 100%인지 확인 (33.3 33.3 33.4 같은 경우를 위해 부동소수점 오차 아주 살짝 허용)
+                total_percent = sum(percent_list)
+                if not (99.9 <= total_percent <= 100.1): 
+                    return await interaction.response.send_message(
+                        f"⚠️ 입력한 퍼센트의 합이 100%가 아닙니다! (현재 합: {total_percent}%)\n비율을 다시 확인해주세요.", 
+                        ephemeral=True
+                    )
+                
+                result_text = f"💰 총 **{amount:,}** 메소 차등 분배 결과\n\n"
+                
+                # 중복되는 퍼센트끼리 묶어서 출력용 데이터 만들기
+                percent_counts = {}
+                for p in percent_list:
+                    percent_counts[p] = percent_counts.get(p, 0) + 1
+                    
+                for p, count in sorted(percent_counts.items(), reverse=True):
+                    # 금액 = 총금액 * (퍼센트 / 100)
+                    person_cut = int(amount * (p / 100))
+                    
+                    # 30.0% 처럼 보이지 않게 정수는 깔끔하게 자르기
+                    display_p = int(p) if p.is_integer() else p
+                    result_text += f"🔹 **{display_p}% ({count}명):** 인당 **{person_cut:,}** 메소\n"
+                    
+                await interaction.response.send_message(result_text)
+                
+            except ValueError:
+                await interaction.response.send_message(
+                    "⚠️ 퍼센트는 숫자로만 입력해주세요. (예: 30 30 40 또는 30,30,40)", 
+                    ephemeral=True
+                )
 
-        # N명 분배 공식: 올릴 가격 = 총수익 / (인원수 - 0.03)
-        upload_price = math.floor(amount / (people - 0.03))
-        
-        # 실제 수령액 검증 (수수료 3% 적용)
-        final_profit = math.floor(upload_price * 0.97)
-
-        # 디스코드 임베드 생성
-        embed = discord.Embed(title=f"💰 보스 수익 1/{people} 분배 계산기", color=0x00ff00)
-        
-        embed.add_field(name="총 분배할 수익", value=f"{format_meso(amount)}\n({amount:,})", inline=False)
-        embed.add_field(name="나머지 파티원들이 올릴 잡템 가격", value=f"**{format_meso(upload_price)}**\n({upload_price:,})", inline=False)
-        embed.add_field(name="각자 챙기는 최종 순수익", value=f"{format_meso(final_profit)}\n({final_profit:,})", inline=False)
-        
-        # 결과 전송
-        await interaction.response.send_message(embed=embed)
-
-# 💡 봇이 이 모듈을 인식하게 해주는 필수 함수 (들여쓰기 없이 맨 바깥쪽에 하나만!)
 async def setup(bot):
     await bot.add_cog(Distribute(bot))
