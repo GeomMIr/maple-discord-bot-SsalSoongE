@@ -224,7 +224,6 @@ class VoteDashboardView(discord.ui.View):
         await self.cog.check_vote_completion(self.party_id)
 
     async def on_timeout(self):
-        # 💡 개인 수정 중 타임아웃이 발생해도 파티 전체의 기록을 지우지 않도록 안전하게 패스합니다.
         pass
 
 
@@ -284,7 +283,6 @@ class PartyActionSelectView(discord.ui.View):
             cycle_row = self.cog.c.fetchone()
             cycle = cycle_row[0] if cycle_row and cycle_row[0] else 'bossWeekly'
             
-            # 💡 기존 데이터를 불러와 대시보드에 적용
             self.cog.c.execute('SELECT available_times FROM vote_records WHERE party_id = ? AND user_id = ?', (party_id, self.user_id))
             record_row = self.cog.c.fetchone()
             accumulated_data = json.loads(record_row[0]) if record_row else {}
@@ -324,6 +322,8 @@ class PartyCreateModal(discord.ui.Modal, title="고정 파티 생성 - 캐릭터
             self.inputs[m_id] = text_input
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
         self.cog.c.execute('INSERT INTO parties (guild_id, boss_name, cycle) VALUES (?, ?, ?)', (self.guild.id, self.boss_name, self.cycle))
         party_id = self.cog.c.lastrowid
         self.cog.c.execute('INSERT INTO party_members (party_id, user_id, character_name) VALUES (?, ?, ?)', (party_id, self.user_id, self.char_name))
@@ -344,7 +344,11 @@ class PartyCreateModal(discord.ui.Modal, title="고정 파티 생성 - 캐릭터
             except: pass
 
         member_display_strs = [f"<@{m_id}> ({m_char})" for m_id, m_char in party_members_data]
-        await interaction.response.edit_message(content=f"🎉 **[고정팟 ID: {party_id}]** 파티가 성공적으로 생성되었으며, 파티원들에게 초대 DM이 전송되었습니다!\n⚔️ **보스:** {self.boss_name}\n👥 **파티원 목록:**\n" + "\n".join([f"• {s}" for s in member_display_strs]), view=None)
+        
+        await interaction.edit_original_response(
+            content=f"🎉 **[고정팟 ID: {party_id}]** 파티가 성공적으로 생성되었으며, 파티원들에게 초대 DM이 전송되었습니다!\n⚔️ **보스:** {self.boss_name}\n👥 **파티원 목록:**\n" + "\n".join([f"• {s}" for s in member_display_strs]), 
+            view=None
+        )
 
 class PartyMemberSelectView(discord.ui.View):
     def __init__(self, cog, user_id, char_name, boss_name, cycle, guild):
@@ -587,7 +591,6 @@ class PartyScheduler(commands.Cog):
         view = PartyActionSelectView(self, interaction.user.id, my_parties, action_type='vote', target_channel_id=target_channel_id)
         await interaction.followup.send(f"📢 **고정 파티 전체 재투표**\n투표를 시작할 고정 파티를 선택해주세요.", view=view, ephemeral=True)
 
-    # 💡 [신규] 내 일정만 수정하는 명령어
     @app_commands.command(name="내일정수정", description="파티 전체 투표를 초기화하지 않고, 내 일정만 수정하여 결과를 업데이트합니다.")
     async def edit_my_vote_ui(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -600,7 +603,6 @@ class PartyScheduler(commands.Cog):
         await interaction.followup.send(f"✏️ **내 일정 수정**\n일정을 수정할 고정 파티를 선택해주세요.", view=view, ephemeral=True)
 
     async def _execute_vote(self, party_id, boss_name, channel_id):
-        # 전체 재투표 시에는 기존 기록을 모두 초기화합니다.
         self.c.execute('DELETE FROM vote_records WHERE party_id = ?', (party_id,))
         self.c.execute('INSERT OR REPLACE INTO vote_sessions (party_id, channel_id) VALUES (?, ?)', (party_id, channel_id))
         
@@ -659,7 +661,6 @@ class PartyScheduler(commands.Cog):
         records = self.c.fetchall()
         
         if len(records) >= total_members:
-            # 💡 공지 채널을 vote_sessions 대신 parties와 guild_settings에서 가져와 세션에 구애받지 않고 언제든 알림을 보냅니다.
             self.c.execute('SELECT guild_id, boss_name, cycle FROM parties WHERE party_id = ?', (party_id,))
             party_info = self.c.fetchone()
             if not party_info: return
@@ -707,8 +708,6 @@ class PartyScheduler(commands.Cog):
             mentions_text = " ".join([f"<@{r[0]}>" for r in records])
             
             await channel.send(content=mentions_text, embed=embed)
-            
-            # 💡 [핵심] 투표 완료 후에도 vote_records를 지우지 않아 이후 개별 수정 시 대응하게 만듭니다.
 
 async def setup(bot):
     await bot.add_cog(PartyScheduler(bot))
