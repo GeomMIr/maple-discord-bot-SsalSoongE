@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 class VoteTimeSelectView(discord.ui.View):
     def __init__(self, cog, party_id, boss_name, user_id, days_list, current_index, accumulated_data):
-        super().__init__(timeout=300)
+        super().__init__(timeout=86400) # 1일 타임아웃
         self.cog = cog
         self.party_id = party_id
         self.boss_name = boss_name
@@ -66,7 +66,9 @@ class VoteTimeSelectView(discord.ui.View):
                 content=f"🗓️ **[{self.boss_name}] 일정 투표**\n({self.current_index + 2}/{len(self.days_list)}) **{self.days_list[self.current_index + 1]}요일**에 가능한 시간을 선택해주세요.",
                 view=next_view
             )
+            self.stop()
         else:
+            self.stop()
             self.cog.c.execute('INSERT OR REPLACE INTO vote_records (party_id, user_id, available_times) VALUES (?, ?, ?)', 
                                (self.party_id, self.user_id, json.dumps(self.accumulated_data)))
             self.cog.conn.commit()
@@ -83,10 +85,24 @@ class VoteTimeSelectView(discord.ui.View):
             
             await self.cog.check_vote_completion(self.party_id)
 
+    async def on_timeout(self):
+        self.cog.c.execute('SELECT 1 FROM vote_sessions WHERE party_id = ?', (self.party_id,))
+        if self.cog.c.fetchone():
+            self.cog.c.execute('DELETE FROM vote_sessions WHERE party_id = ?', (self.party_id,))
+            self.cog.c.execute('DELETE FROM vote_records WHERE party_id = ?', (self.party_id,))
+            self.cog.conn.commit()
+            
+            self.cog.c.execute('SELECT user_id FROM party_members WHERE party_id = ?', (self.party_id,))
+            for (m_id,) in self.cog.c.fetchall():
+                try:
+                    user = self.cog.bot.get_user(m_id) or await self.cog.bot.fetch_user(m_id)
+                    await user.send(f"⚠️ **[{self.boss_name}]** 파티의 일정 투표가 **1일**이 지나 만료되었습니다.\n투표가 완료되지 않아 세션이 종료되었으니, 디스코드 서버 채팅창에서 `/고정팟투표` 명령어를 입력해 재투표를 진행해주세요!")
+                except:
+                    pass
 
 class VoteDaySelectView(discord.ui.View):
     def __init__(self, cog, party_id, boss_name, user_id):
-        super().__init__(timeout=300)
+        super().__init__(timeout=86400) # 1일 타임아웃
         self.cog = cog
         self.party_id = party_id
         self.boss_name = boss_name
@@ -124,7 +140,22 @@ class VoteDaySelectView(discord.ui.View):
             content=f"🗓️ **[{self.boss_name}] 일정 투표**\n(1/{len(selected_days)}) **{selected_days[0]}요일**에 가능한 시간을 선택해주세요.",
             view=next_view
         )
+        self.stop()
 
+    async def on_timeout(self):
+        self.cog.c.execute('SELECT 1 FROM vote_sessions WHERE party_id = ?', (self.party_id,))
+        if self.cog.c.fetchone():
+            self.cog.c.execute('DELETE FROM vote_sessions WHERE party_id = ?', (self.party_id,))
+            self.cog.c.execute('DELETE FROM vote_records WHERE party_id = ?', (self.party_id,))
+            self.cog.conn.commit()
+            
+            self.cog.c.execute('SELECT user_id FROM party_members WHERE party_id = ?', (self.party_id,))
+            for (m_id,) in self.cog.c.fetchall():
+                try:
+                    user = self.cog.bot.get_user(m_id) or await self.cog.bot.fetch_user(m_id)
+                    await user.send(f"⚠️ **[{self.boss_name}]** 파티의 일정 투표가 **1일**이 지나 만료되었습니다.\n투표가 완료되지 않아 세션이 종료되었으니, 디스코드 서버 채팅창에서 `/고정팟투표` 명령어를 입력해 재투표를 진행해주세요!")
+                except:
+                    pass
 
 # ==========================================
 # 2. 고정팟 삭제/수동 투표 뷰
@@ -203,7 +234,6 @@ class PartyCreateModal(discord.ui.Modal, title="고정 파티 생성 - 캐릭터
             self.inputs[m_id] = text_input
 
     async def on_submit(self, interaction: discord.Interaction):
-        # 💡 DB에 파티 저장 시 소속 서버(guild_id) 함께 저장
         self.cog.c.execute('INSERT INTO parties (guild_id, boss_name) VALUES (?, ?)', (self.guild.id, self.boss_name))
         party_id = self.cog.c.lastrowid
         self.cog.c.execute('INSERT INTO party_members (party_id, user_id, character_name) VALUES (?, ?, ?)', (party_id, self.user_id, self.char_name))
@@ -243,7 +273,7 @@ class PartyMemberSelectView(discord.ui.View):
         self.add_item(self.select_item)
 
     async def member_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id: return await interaction.response.send_message("본인만 조작할 수 있습니다!", ephemeral=True)
+        if interaction.user.id != self.user_id: return await interaction.response.send_message("본인만 조작할 수 매습니다!", ephemeral=True)
         if self.select_item.values[0] == "error": return await interaction.response.send_message("⚠️ 멤버 목록을 불러올 수 없어 파티원을 선택할 수 없습니다.", ephemeral=True)
 
         selected_member_ids = [int(uid) for uid in self.select_item.values]
@@ -298,21 +328,18 @@ class PartyScheduler(commands.Cog):
         self.c = self.conn.cursor()
         self._create_tables()
         
-        # 💡 플러그인 로드 시 자동화 루프 시작
         self.weekly_vote_task.start()
 
     def cog_unload(self):
-        # 💡 플러그인 언로드 시 루프 종료
         self.weekly_vote_task.cancel()
 
     def _create_tables(self):
-        # 💡 기존 parties 테이블에 guild_id가 없을 경우를 대비해 ALTER TABLE로 추가
         self.c.execute('''CREATE TABLE IF NOT EXISTS parties (party_id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, boss_name TEXT)''')
         try:
             self.c.execute("ALTER TABLE parties ADD COLUMN guild_id INTEGER")
             self.conn.commit()
         except sqlite3.OperationalError:
-            pass # 이미 컬럼이 존재하면 무시
+            pass 
 
         self.c.execute('''CREATE TABLE IF NOT EXISTS party_members (party_id INTEGER, user_id INTEGER, character_name TEXT, PRIMARY KEY (party_id, user_id))''')
         self.c.execute('''CREATE TABLE IF NOT EXISTS vote_sessions (party_id INTEGER PRIMARY KEY, channel_id INTEGER)''')
@@ -320,13 +347,11 @@ class PartyScheduler(commands.Cog):
         self.c.execute('''CREATE TABLE IF NOT EXISTS guild_settings (guild_id INTEGER PRIMARY KEY, notice_channel_id INTEGER)''')
         self.conn.commit()
 
-    # 💡 1분마다 실행되는 스케줄러 (목요일 오전 10시 체크)
     @tasks.loop(minutes=1)
     async def weekly_vote_task(self):
         kst = timezone(timedelta(hours=9))
         now = datetime.now(kst)
         
-        # weekday() 3 = 목요일, hour 10 = 오전 10시, minute 0 = 0분
         if now.weekday() == 3 and now.hour == 10 and now.minute == 0:
             if getattr(self, "last_vote_date", None) != now.date():
                 self.last_vote_date = now.date()
@@ -334,11 +359,9 @@ class PartyScheduler(commands.Cog):
 
     @weekly_vote_task.before_loop
     async def before_weekly_vote_task(self):
-        await self.bot.wait_until_ready() # 봇이 완전히 켜질 때까지 대기
+        await self.bot.wait_until_ready() 
 
     async def _trigger_all_automated_votes(self):
-        """자동으로 등록된 모든 파티에 대해 투표를 발송합니다."""
-        # 공지 채널이 설정되어 있고, 길드 ID가 매칭되는 파티들만 불러오기
         self.c.execute('''
             SELECT p.party_id, p.boss_name, g.notice_channel_id 
             FROM parties p 
@@ -419,17 +442,14 @@ class PartyScheduler(commands.Cog):
 
     @app_commands.command(name="고정팟투표", description="내가 속한 파티원들에게 일정 투표 DM을 발송합니다. (일정 변동 시 재투표용)")
     async def force_vote_ui(self, interaction: discord.Interaction):
-        # 💡 [수정됨] 3초 타임아웃 방지를 위해 defer() 먼저 호출
         await interaction.response.defer(ephemeral=True)
         
         if interaction.guild_id is None:
-            # 💡 [수정됨] defer() 이후에는 send_message가 아닌 followup.send 사용
             return await interaction.followup.send("서버 내에서만 사용할 수 있는 명령어입니다.", ephemeral=True)
             
         self.c.execute('SELECT notice_channel_id FROM guild_settings WHERE guild_id = ?', (interaction.guild_id,))
         row = self.c.fetchone()
         if not row:
-            # 💡 [수정됨] followup.send 적용
             return await interaction.followup.send("⚠️ 투표 결과를 올릴 공지 채널이 지정되지 않았습니다.\n`/고정팟채널지정` 명령어로 알림을 받을 채널을 먼저 설정해주세요.", ephemeral=True)
         
         target_channel_id = row[0]
@@ -437,14 +457,11 @@ class PartyScheduler(commands.Cog):
         self.c.execute('''SELECT p.party_id, p.boss_name FROM parties p JOIN party_members m ON p.party_id = m.party_id WHERE m.user_id = ?''', (interaction.user.id,))
         my_parties = self.c.fetchall()
         if not my_parties: 
-            # 💡 [수정됨] followup.send 적용
             return await interaction.followup.send("투표를 시작할 파티가 없습니다.", ephemeral=True)
         
         view = PartyActionSelectView(self, interaction.user.id, my_parties, action_type='vote', target_channel_id=target_channel_id)
-        # 💡 [수정됨] followup.send 적용
         await interaction.followup.send(f"📢 **고정 파티 일정 투표**\n투표를 시작할 고정 파티를 선택해주세요.", view=view, ephemeral=True)
 
-    # 💡 투표 발송 코어 로직 (수동/자동 통합)
     async def _execute_vote(self, party_id, boss_name, channel_id):
         self.c.execute('DELETE FROM vote_records WHERE party_id = ?', (party_id,))
         self.c.execute('INSERT OR REPLACE INTO vote_sessions (party_id, channel_id) VALUES (?, ?)', (party_id, channel_id))
