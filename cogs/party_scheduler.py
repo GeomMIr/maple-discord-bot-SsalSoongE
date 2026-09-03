@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 class VoteTimeSelectView(discord.ui.View):
     def __init__(self, cog, party_id, boss_name, user_id, days_list, current_index, accumulated_data, is_monthly=False):
-        super().__init__(timeout=86400) # 1일 타임아웃
+        super().__init__(timeout=86400) 
         self.cog = cog
         self.party_id = party_id
         self.boss_name = boss_name
@@ -104,7 +104,6 @@ class VoteTimeSelectView(discord.ui.View):
                 except:
                     pass
 
-# 💡 월간 보스 전용 날짜 선택 뷰
 class VoteDateSelectView(discord.ui.View):
     def __init__(self, cog, party_id, boss_name, user_id):
         super().__init__(timeout=86400)
@@ -412,14 +411,12 @@ class PartyScheduler(commands.Cog):
     def _create_tables(self):
         self.c.execute('''CREATE TABLE IF NOT EXISTS parties (party_id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, boss_name TEXT)''')
         
-        # 💡 보스 주기(cycle) 컬럼 추가 시도
         try:
             self.c.execute("ALTER TABLE parties ADD COLUMN cycle TEXT DEFAULT 'bossWeekly'")
             self.conn.commit()
         except sqlite3.OperationalError:
             pass 
 
-        # 길드 ID 컬럼 추가 시도
         try:
             self.c.execute("ALTER TABLE parties ADD COLUMN guild_id INTEGER")
             self.conn.commit()
@@ -478,21 +475,30 @@ class PartyScheduler(commands.Cog):
                 if resp.status != 200: return None
                 data = await resp.json()
                 
-                boss_options = []
+                monthly_bosses = []
+                weekly_bosses = []
+                
                 for b in data.get("boss_contents", []):
                     if b.get("registration_flag") == "true":
                         boss_name = b.get("content_name", "")
                         cycle = b.get("cycle")
+                        
                         if "시즌 보스" in boss_name or cycle == "bossDaily": continue
                         
                         prefix = "주간" if cycle == "bossWeekly" else "월간"
                         diff = b['difficulty'].upper()
                         label = f"[{prefix}] {boss_name} ({diff})"
                         value = f"{cycle}||{boss_name} ({diff})"
+                        opt = discord.SelectOption(label=label, value=value)
                         
-                        if not any(opt.value == value for opt in boss_options):
-                            boss_options.append(discord.SelectOption(label=label, value=value))
-                            
+                        if cycle == "bossMonthly":
+                            if not any(o.value == value for o in monthly_bosses):
+                                monthly_bosses.append(opt)
+                        else:
+                            if not any(o.value == value for o in weekly_bosses):
+                                weekly_bosses.append(opt)
+                
+                boss_options = monthly_bosses + weekly_bosses
                 return boss_options[:25]
 
     @app_commands.command(name="고정팟생성", description="내 캐릭터를 골라 보스를 선택하고 고정 파티를 생성합니다.")
