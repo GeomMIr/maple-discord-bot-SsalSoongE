@@ -8,230 +8,228 @@ import calendar
 from datetime import datetime, timedelta, timezone
 
 # ==========================================
-# 1. 고정팟 투표 시스템 UI (DM용 위저드)
+# 1. 고정팟 투표 시스템 UI (대시보드 방식)
 # ==========================================
 
-class VoteTimeSelectView(discord.ui.View):
-    def __init__(self, cog, party_id, boss_name, user_id, days_list, current_index, accumulated_data, is_monthly=False):
-        super().__init__(timeout=86400) 
-        self.cog = cog
-        self.party_id = party_id
-        self.boss_name = boss_name
-        self.user_id = user_id
-        self.days_list = days_list
-        self.current_index = current_index
-        self.current_day = days_list[current_index]
-        self.accumulated_data = accumulated_data
-        self.is_monthly = is_monthly
+class TimeSelectView(discord.ui.View):
+    def __init__(self, dashboard, targets, title_context="선택한 날짜"):
+        super().__init__(timeout=86400)
+        self.dashboard = dashboard
+        self.targets = targets
+
+        base_times = dashboard.accumulated_data.get(targets[0], [])
 
         options = [discord.SelectOption(label="✅ 전부 (24시간 가능)", value="all")]
         for h in range(24):
             start = f"{str(h).zfill(2)}:00"
             end = f"{str((h+1)%24).zfill(2)}:00" if h < 23 else "24:00"
-            options.append(discord.SelectOption(label=f"{start} ~ {end}", value=start))
-        
-        day_str = f"{self.current_day}에" if self.is_monthly else f"{self.current_day}요일에"
-        
-        self.select_item = discord.ui.Select(
-            placeholder=f"⏰ {day_str} 가능한 시간을 모두 고르세요", 
+            is_def = start in base_times
+            options.append(discord.SelectOption(label=f"{start} ~ {end}", value=start, default=is_def))
+
+        self.sel = discord.ui.Select(
+            placeholder=f"⏰ {title_context}에 가능한 시간을 선택 (복수 선택)", 
             min_values=1, 
             max_values=25, 
-            options=options
+            options=options, 
+            row=0
         )
-        self.select_item.callback = self.select_callback
-        self.add_item(self.select_item)
+        self.sel.callback = self.on_sel
+        self.add_item(self.sel)
 
-        is_last = (current_index == len(days_list) - 1)
-        btn_label = "✅ 투표 완료" if is_last else "➡️ 다음 날로"
-        btn_style = discord.ButtonStyle.success if is_last else discord.ButtonStyle.primary
+        btn_save = discord.ui.Button(label="💾 저장하고 메인으로", style=discord.ButtonStyle.success, row=1)
+        btn_clear = discord.ui.Button(label="🗑️ 시간 비우기", style=discord.ButtonStyle.danger, row=1)
+        btn_back = discord.ui.Button(label="⬅️ 뒤로가기 (취소)", style=discord.ButtonStyle.secondary, row=1)
 
-        self.next_btn = discord.ui.Button(label=btn_label, style=btn_style)
-        self.next_btn.callback = self.btn_callback
-        self.add_item(self.next_btn)
+        btn_save.callback = self.on_save
+        btn_clear.callback = self.on_clear
+        btn_back.callback = self.on_back
 
-    async def select_callback(self, interaction: discord.Interaction):
+        self.add_item(btn_save)
+        self.add_item(btn_clear)
+        self.add_item(btn_back)
+
+    async def on_sel(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-    async def btn_callback(self, interaction: discord.Interaction):
-        if not self.select_item.values:
-            await interaction.response.send_message("최소 1개 이상의 시간을 선택해주세요!", ephemeral=True)
-            return
-            
-        if "all" in self.select_item.values:
-            selected_times = [f"{str(h).zfill(2)}:00" for h in range(24)]
+    async def on_save(self, interaction: discord.Interaction):
+        vals = self.sel.values
+        if not vals:
+            return await interaction.response.send_message("시간을 선택하거나 '시간 비우기'를 눌러주세요.", ephemeral=True)
+
+        if "all" in vals:
+            final_times = [f"{str(h).zfill(2)}:00" for h in range(24)]
         else:
-            selected_times = self.select_item.values
+            final_times = vals
 
-        self.accumulated_data[self.current_day] = selected_times
+        for t in self.targets:
+            self.dashboard.accumulated_data[t] = final_times
 
-        if self.current_index + 1 < len(self.days_list):
-            next_view = VoteTimeSelectView(self.cog, self.party_id, self.boss_name, self.user_id, self.days_list, self.current_index + 1, self.accumulated_data, self.is_monthly)
-            await interaction.response.edit_message(
-                content=f"🗓️ **[{self.boss_name}] 일정 투표**\n({self.current_index + 2}/{len(self.days_list)}) **{self.days_list[self.current_index + 1]}**에 가능한 시간을 선택해주세요.",
-                view=next_view
-            )
-            self.stop()
+        await self.dashboard.update_message(interaction)
+
+    async def on_clear(self, interaction: discord.Interaction):
+        for t in self.targets:
+            if t in self.dashboard.accumulated_data:
+                del self.dashboard.accumulated_data[t]
+        await self.dashboard.update_message(interaction)
+
+    async def on_back(self, interaction: discord.Interaction):
+        await self.dashboard.update_message(interaction)
+
+
+class TargetSelectView(discord.ui.View):
+    def __init__(self, dashboard):
+        super().__init__(timeout=86400)
+        self.dashboard = dashboard
+        
+        if dashboard.cycle == 'bossMonthly':
+            opts1 = [discord.SelectOption(label=d, value=d) for d in dashboard.all_days[:15]]
+            opts2 = [discord.SelectOption(label=d, value=d) for d in dashboard.all_days[15:]]
+            
+            self.sel1 = discord.ui.Select(placeholder="🗓️ 1일~15일 중 선택", min_values=0, max_values=len(opts1), options=opts1, row=0)
+            self.sel2 = discord.ui.Select(placeholder="🗓️ 16일~말일 중 선택", min_values=0, max_values=len(opts2), options=opts2, row=1)
+            self.sel1.callback = self.on_sel
+            self.sel2.callback = self.on_sel
+            self.add_item(self.sel1)
+            self.add_item(self.sel2)
         else:
-            self.stop()
-            self.cog.c.execute('INSERT OR REPLACE INTO vote_records (party_id, user_id, available_times) VALUES (?, ?, ?)', 
-                               (self.party_id, self.user_id, json.dumps(self.accumulated_data)))
-            self.cog.conn.commit()
-            
-            self.cog.c.execute('SELECT COUNT(*) FROM vote_records WHERE party_id = ?', (self.party_id,))
-            voted_count = self.cog.c.fetchone()[0]
-            self.cog.c.execute('SELECT COUNT(*) FROM party_members WHERE party_id = ?', (self.party_id,))
-            total_members = self.cog.c.fetchone()[0]
+            opts = [discord.SelectOption(label=d, value=d) for d in dashboard.all_days]
+            self.sel1 = discord.ui.Select(placeholder="🗓️ 세부 설정할 요일을 선택 (복수 선택)", min_values=0, max_values=len(opts), options=opts, row=0)
+            self.sel1.callback = self.on_sel
+            self.add_item(self.sel1)
 
-            await interaction.response.edit_message(
-                content=f"🎉 **[{self.boss_name}] 투표가 완료되었습니다!**\n📊 현재 투표 현황: **{voted_count} / {total_members}명** 완료\n모든 파티원이 투표를 마치면 지정된 채널에 결과가 공지됩니다.",
-                view=None
-            )
-            
-            await self.cog.check_vote_completion(self.party_id)
+        btn_next = discord.ui.Button(label="➡️ 시간 설정으로", style=discord.ButtonStyle.primary, row=2)
+        btn_back = discord.ui.Button(label="⬅️ 뒤로가기", style=discord.ButtonStyle.secondary, row=2)
 
-    async def on_timeout(self):
-        self.cog.c.execute('SELECT 1 FROM vote_sessions WHERE party_id = ?', (self.party_id,))
-        if self.cog.c.fetchone():
-            self.cog.c.execute('DELETE FROM vote_sessions WHERE party_id = ?', (self.party_id,))
-            self.cog.c.execute('DELETE FROM vote_records WHERE party_id = ?', (self.party_id,))
-            self.cog.conn.commit()
-            
-            self.cog.c.execute('SELECT user_id FROM party_members WHERE party_id = ?', (self.party_id,))
-            for (m_id,) in self.cog.c.fetchall():
-                try:
-                    user = self.cog.bot.get_user(m_id) or await self.cog.bot.fetch_user(m_id)
-                    await user.send(f"⚠️ **[{self.boss_name}]** 파티의 일정 투표가 **1일**이 지나 만료되었습니다.\n투표가 완료되지 않아 세션이 종료되었으니, 디스코드 서버 채팅창에서 `/고정팟투표` 명령어를 입력해 재투표를 진행해주세요!")
-                except:
-                    pass
+        btn_next.callback = self.on_next
+        btn_back.callback = self.on_back
+        self.add_item(btn_next)
+        self.add_item(btn_back)
 
-class VoteDateSelectView(discord.ui.View):
-    def __init__(self, cog, party_id, boss_name, user_id):
+    async def on_sel(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+    async def on_next(self, interaction: discord.Interaction):
+        vals1 = self.sel1.values if hasattr(self, 'sel1') else []
+        vals2 = self.sel2.values if hasattr(self, 'sel2') else []
+        targets = vals1 + vals2
+        
+        if not targets:
+            return await interaction.response.send_message("최소 1개 이상의 항목을 선택해주세요!", ephemeral=True)
+            
+        if self.dashboard.cycle == 'bossMonthly':
+            targets.sort(key=lambda x: int(x.split("일")[0]))
+        else:
+            order = {"월":0, "화":1, "수":2, "목":3, "금":4, "토":5, "일":6}
+            targets.sort(key=lambda x: order.get(x, 9))
+
+        await interaction.response.edit_message(view=TimeSelectView(self.dashboard, targets, "선택한 항목"))
+
+    async def on_back(self, interaction: discord.Interaction):
+        await self.dashboard.update_message(interaction)
+
+
+class VoteDashboardView(discord.ui.View):
+    def __init__(self, cog, party_id, boss_name, user_id, cycle, accumulated_data=None):
         super().__init__(timeout=86400)
         self.cog = cog
         self.party_id = party_id
         self.boss_name = boss_name
         self.user_id = user_id
+        self.cycle = cycle
+        self.accumulated_data = accumulated_data or {}
 
-        now = datetime.now(timezone(timedelta(hours=9)))
-        _, last_day = calendar.monthrange(now.year, now.month)
-        weekdays = ["월", "화", "수", "목", "금", "토", "일"]
+        self.all_days = []
+        self.weekdays = []
+        self.weekends = []
         
-        options1, options2 = [], []
+        if cycle == 'bossMonthly':
+            now = datetime.now(timezone(timedelta(hours=9)))
+            _, last_day = calendar.monthrange(now.year, now.month)
+            wd_names = ["월", "화", "수", "목", "금", "토", "일"]
+            for d in range(1, last_day + 1):
+                target = now.replace(day=d)
+                idx = target.weekday()
+                label = f"{d}일 ({wd_names[idx]})"
+                self.all_days.append(label)
+                if idx < 5: self.weekdays.append(label)
+                else: self.weekends.append(label)
+        else:
+            self.all_days = ["월", "화", "수", "목", "금", "토", "일"]
+            self.weekdays = ["월", "화", "수", "목", "금"]
+            self.weekends = ["토", "일"]
+
+        btn_wd = discord.ui.Button(label="🗓️ 평일 일괄 설정", style=discord.ButtonStyle.primary, row=0)
+        btn_wk = discord.ui.Button(label="🎉 주말 일괄 설정", style=discord.ButtonStyle.primary, row=0)
+        btn_cu = discord.ui.Button(label="🔍 세부 날짜 설정", style=discord.ButtonStyle.secondary, row=0)
+        btn_sb = discord.ui.Button(label="✅ 최종 투표 제출", style=discord.ButtonStyle.success, row=1)
+
+        btn_wd.callback = self.on_wd
+        btn_wk.callback = self.on_wk
+        btn_cu.callback = self.on_cu
+        btn_sb.callback = self.on_submit
+
+        self.add_item(btn_wd)
+        self.add_item(btn_wk)
+        self.add_item(btn_cu)
+        self.add_item(btn_sb)
+
+    def generate_embed(self):
+        embed = discord.Embed(title=f"📊 [{self.boss_name}] 투표 컨트롤 패널", color=discord.Color.gold())
+        desc = "**[현재 설정된 나의 일정]**\n"
+        has_any = False
         
-        for d in range(1, last_day + 1):
-            target_date = now.replace(day=d)
-            wd_str = weekdays[target_date.weekday()]
-            label = f"{d}일 ({wd_str})"
-            opt = discord.SelectOption(label=label, value=label)
-            if d <= 15:
-                options1.append(opt)
-            else:
-                options2.append(opt)
+        for day in self.all_days:
+            times = self.accumulated_data.get(day, [])
+            if times:
+                has_any = True
+                merged = self.cog._merge_time_slots(times)
+                desc += f"🔹 **{day}**: {merged}\n"
+                
+        if not has_any:
+            desc += "아직 설정된 일정이 없습니다.\n위의 버튼을 눌러 가능한 시간을 추가해주세요."
 
-        self.select1 = discord.ui.Select(placeholder="🗓️ 1일 ~ 15일 중 가능한 날짜", min_values=0, max_values=len(options1), options=options1, row=0)
-        self.select1.callback = self.select_callback
-        self.add_item(self.select1)
+        embed.description = desc
+        return embed
 
-        if options2:
-            self.select2 = discord.ui.Select(placeholder=f"🗓️ 16일 ~ {last_day}일 중 가능한 날짜", min_values=0, max_values=len(options2), options=options2, row=1)
-            self.select2.callback = self.select_callback
-            self.add_item(self.select2)
+    async def update_message(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=self.generate_embed(), view=self)
 
-        self.next_btn = discord.ui.Button(label="➡️ 다음 단계 (시간 선택)", style=discord.ButtonStyle.primary, row=2)
-        self.next_btn.callback = self.btn_callback
-        self.add_item(self.next_btn)
+    async def on_wd(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=TimeSelectView(self, self.weekdays, "평일 전체"))
 
-    async def select_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+    async def on_wk(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=TimeSelectView(self, self.weekends, "주말 전체"))
 
-    async def btn_callback(self, interaction: discord.Interaction):
-        vals1 = self.select1.values if hasattr(self, 'select1') else []
-        vals2 = self.select2.values if hasattr(self, 'select2') else []
-        total_vals = vals1 + vals2
-        
-        if not total_vals:
-            return await interaction.response.send_message("최소 1개 이상의 날짜를 선택해주세요!", ephemeral=True)
+    async def on_cu(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=TargetSelectView(self))
 
-        sorted_dates = sorted(total_vals, key=lambda x: int(x.split("일")[0]))
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.accumulated_data:
+            return await interaction.response.send_message("최소 1개 이상의 일정을 설정한 후 제출해주세요!", ephemeral=True)
 
-        next_view = VoteTimeSelectView(self.cog, self.party_id, self.boss_name, self.user_id, sorted_dates, 0, {}, is_monthly=True)
-        await interaction.response.edit_message(
-            content=f"🗓️ **[{self.boss_name}] 일정 투표**\n(1/{len(sorted_dates)}) **{sorted_dates[0]}**에 가능한 시간을 선택해주세요.",
-            view=next_view
-        )
         self.stop()
+        self.cog.c.execute('INSERT OR REPLACE INTO vote_records (party_id, user_id, available_times) VALUES (?, ?, ?)',
+                           (self.party_id, self.user_id, json.dumps(self.accumulated_data)))
+        self.cog.conn.commit()
+
+        self.cog.c.execute('SELECT COUNT(*) FROM vote_records WHERE party_id = ?', (self.party_id,))
+        voted_count = self.cog.c.fetchone()[0]
+        self.cog.c.execute('SELECT COUNT(*) FROM party_members WHERE party_id = ?', (self.party_id,))
+        total_members = self.cog.c.fetchone()[0]
+
+        await interaction.response.edit_message(
+            content=f"🎉 **[{self.boss_name}] 투표가 완료되었습니다!**\n📊 현재 투표 현황: **{voted_count} / {total_members}명** 완료\n모든 파티원이 투표를 마치면 지정된 채널에 결과가 공지됩니다.",
+            embed=None, view=None
+        )
+        await self.cog.check_vote_completion(self.party_id)
 
     async def on_timeout(self):
-        self.cog.c.execute('SELECT 1 FROM vote_sessions WHERE party_id = ?', (self.party_id,))
-        if self.cog.c.fetchone():
-            self.cog.c.execute('DELETE FROM vote_sessions WHERE party_id = ?', (self.party_id,))
-            self.cog.c.execute('DELETE FROM vote_records WHERE party_id = ?', (self.party_id,))
-            self.cog.conn.commit()
-            
-            self.cog.c.execute('SELECT user_id FROM party_members WHERE party_id = ?', (self.party_id,))
-            for (m_id,) in self.cog.c.fetchall():
-                try:
-                    user = self.cog.bot.get_user(m_id) or await self.cog.bot.fetch_user(m_id)
-                    await user.send(f"⚠️ **[{self.boss_name}]** 파티의 일정 투표가 **1일**이 지나 만료되었습니다.\n투표가 완료되지 않아 세션이 종료되었으니, 디스코드 서버 채팅창에서 `/고정팟투표` 명령어를 입력해 재투표를 진행해주세요!")
-                except: pass
+        # 💡 개인 수정 중 타임아웃이 발생해도 파티 전체의 기록을 지우지 않도록 안전하게 패스합니다.
+        pass
 
-class VoteDaySelectView(discord.ui.View):
-    def __init__(self, cog, party_id, boss_name, user_id):
-        super().__init__(timeout=86400) 
-        self.cog = cog
-        self.party_id = party_id
-        self.boss_name = boss_name
-        self.user_id = user_id
-
-        days = ["월", "화", "수", "목", "금", "토", "일"]
-        options = [discord.SelectOption(label=f"{d}요일", value=d) for d in days]
-
-        self.select_item = discord.ui.Select(
-            placeholder="🗓️ 가능한 요일을 모두 고르세요", 
-            min_values=1, 
-            max_values=7, 
-            options=options
-        )
-        self.select_item.callback = self.select_callback
-        self.add_item(self.select_item)
-
-        self.next_btn = discord.ui.Button(label="➡️ 다음 단계 (시간 선택)", style=discord.ButtonStyle.primary)
-        self.next_btn.callback = self.btn_callback
-        self.add_item(self.next_btn)
-
-    async def select_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-
-    async def btn_callback(self, interaction: discord.Interaction):
-        if not self.select_item.values:
-            return await interaction.response.send_message("최소 1개 이상의 요일을 선택해주세요!", ephemeral=True)
-
-        day_order = {"월":0, "화":1, "수":2, "목":3, "금":4, "토":5, "일":6}
-        selected_days = sorted(self.select_item.values, key=lambda x: day_order[x])
-
-        next_view = VoteTimeSelectView(self.cog, self.party_id, self.boss_name, self.user_id, selected_days, 0, {}, is_monthly=False)
-        await interaction.response.edit_message(
-            content=f"🗓️ **[{self.boss_name}] 일정 투표**\n(1/{len(selected_days)}) **{selected_days[0]}요일**에 가능한 시간을 선택해주세요.",
-            view=next_view
-        )
-        self.stop()
-
-    async def on_timeout(self):
-        self.cog.c.execute('SELECT 1 FROM vote_sessions WHERE party_id = ?', (self.party_id,))
-        if self.cog.c.fetchone():
-            self.cog.c.execute('DELETE FROM vote_sessions WHERE party_id = ?', (self.party_id,))
-            self.cog.c.execute('DELETE FROM vote_records WHERE party_id = ?', (self.party_id,))
-            self.cog.conn.commit()
-            
-            self.cog.c.execute('SELECT user_id FROM party_members WHERE party_id = ?', (self.party_id,))
-            for (m_id,) in self.cog.c.fetchall():
-                try:
-                    user = self.cog.bot.get_user(m_id) or await self.bot.fetch_user(m_id)
-                    await user.send(f"⚠️ **[{self.boss_name}]** 파티의 일정 투표가 **1일**이 지나 만료되었습니다.\n투표가 완료되지 않아 세션이 종료되었으니, 디스코드 서버 채팅창에서 `/고정팟투표` 명령어를 입력해 재투표를 진행해주세요!")
-                except: pass
 
 # ==========================================
-# 2. 고정팟 삭제/수동 투표 뷰
+# 2. 고정팟 삭제/수동 투표/내 일정 수정 뷰
 # ==========================================
 class PartyActionSelectView(discord.ui.View):
     def __init__(self, cog, user_id, my_parties, action_type, target_channel_id=None):
@@ -241,12 +239,12 @@ class PartyActionSelectView(discord.ui.View):
         self.action_type = action_type
         self.target_channel_id = target_channel_id 
         
-        emoji = "🗑️" if action_type == 'delete' else "📢"
-        ph = "삭제할 파티를 선택하세요" if action_type == 'delete' else "투표를 진행할 파티를 선택하세요"
+        emoji = "🗑️" if action_type == 'delete' else "📢" if action_type == 'vote' else "✏️"
+        ph = "삭제할 파티" if action_type == 'delete' else "전체 재투표할 파티" if action_type == 'vote' else "일정을 수정할 파티"
         
         options = [discord.SelectOption(label=f"[{p_id}] {b_name}", value=str(p_id)) for p_id, b_name in my_parties[:25]]
         
-        self.select_item = discord.ui.Select(placeholder=f"{emoji} {ph}", min_values=1, max_values=1, options=options)
+        self.select_item = discord.ui.Select(placeholder=f"{emoji} {ph}를 선택하세요", min_values=1, max_values=1, options=options)
         self.select_item.callback = self.action_callback
         self.add_item(self.select_item)
 
@@ -276,10 +274,29 @@ class PartyActionSelectView(discord.ui.View):
         elif self.action_type == 'vote':
             await interaction.response.defer()
             failed_members = await self.cog._execute_vote(party_id, boss_name, self.target_channel_id)
-            
             msg = f"✅ **[{boss_name}]** 파티원 전원에게 수동 투표 DM을 발송했습니다!"
             if failed_members: msg += f"\n⚠️ 다음 유저는 DM 차단으로 인해 발송하지 못했습니다: {', '.join(failed_members)}"
             await interaction.followup.send(content=msg, ephemeral=True)
+
+        elif self.action_type == 'edit_self':
+            await interaction.response.defer()
+            self.cog.c.execute('SELECT cycle FROM parties WHERE party_id = ?', (party_id,))
+            cycle_row = self.cog.c.fetchone()
+            cycle = cycle_row[0] if cycle_row and cycle_row[0] else 'bossWeekly'
+            
+            # 💡 기존 데이터를 불러와 대시보드에 적용
+            self.cog.c.execute('SELECT available_times FROM vote_records WHERE party_id = ? AND user_id = ?', (party_id, self.user_id))
+            record_row = self.cog.c.fetchone()
+            accumulated_data = json.loads(record_row[0]) if record_row else {}
+
+            view = VoteDashboardView(self.cog, party_id, boss_name, self.user_id, cycle, accumulated_data)
+            embed = view.generate_embed()
+            try:
+                user = self.cog.bot.get_user(self.user_id) or await self.cog.bot.fetch_user(self.user_id)
+                await user.send(content=f"📢 **[{boss_name}] 내 일정 수정**\n아래 패널에서 일정을 수정하고 제출해주세요.", embed=embed, view=view)
+                await interaction.followup.send(f"✅ **[{boss_name}]** 일정 수정 패널을 DM으로 발송했습니다!", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.followup.send("⚠️ DM 차단으로 인해 패널을 보낼 수 없습니다.", ephemeral=True)
 
 
 # ==========================================
@@ -434,13 +451,11 @@ class PartyScheduler(commands.Cog):
         kst = timezone(timedelta(hours=9))
         now = datetime.now(kst)
         
-        # 💡 주간 보스: 매주 목요일 오전 10시
         if now.weekday() == 3 and now.hour == 10 and now.minute == 0:
             if getattr(self, "last_weekly_vote_date", None) != now.date():
                 self.last_weekly_vote_date = now.date()
                 await self._trigger_automated_votes('bossWeekly')
                 
-        # 💡 월간 보스: 매월 1일 오전 10시
         if now.day == 1 and now.hour == 10 and now.minute == 0:
             if getattr(self, "last_monthly_vote_date", None) != now.date():
                 self.last_monthly_vote_date = now.date()
@@ -550,7 +565,7 @@ class PartyScheduler(commands.Cog):
         self.conn.commit()
         await interaction.response.send_message(f"✅ 앞으로 고정팟 일정 투표 결과는 {channel.mention} 채널에 공지됩니다!\n(주간 보스는 매주 목요일, 월간 보스는 매월 1일에 자동 투표 DM이 발송됩니다.)")
 
-    @app_commands.command(name="고정팟투표", description="내가 속한 파티원들에게 일정 투표 DM을 발송합니다. (일정 변동 시 재투표용)")
+    @app_commands.command(name="고정팟투표", description="파티 전체에 새로운 일정 투표 DM을 발송합니다. (전체 재투표용)")
     async def force_vote_ui(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
@@ -570,9 +585,22 @@ class PartyScheduler(commands.Cog):
             return await interaction.followup.send("투표를 시작할 파티가 없습니다.", ephemeral=True)
         
         view = PartyActionSelectView(self, interaction.user.id, my_parties, action_type='vote', target_channel_id=target_channel_id)
-        await interaction.followup.send(f"📢 **고정 파티 일정 투표**\n투표를 시작할 고정 파티를 선택해주세요.", view=view, ephemeral=True)
+        await interaction.followup.send(f"📢 **고정 파티 전체 재투표**\n투표를 시작할 고정 파티를 선택해주세요.", view=view, ephemeral=True)
+
+    # 💡 [신규] 내 일정만 수정하는 명령어
+    @app_commands.command(name="내일정수정", description="파티 전체 투표를 초기화하지 않고, 내 일정만 수정하여 결과를 업데이트합니다.")
+    async def edit_my_vote_ui(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        self.c.execute('''SELECT p.party_id, p.boss_name FROM parties p JOIN party_members m ON p.party_id = m.party_id WHERE m.user_id = ?''', (interaction.user.id,))
+        my_parties = self.c.fetchall()
+        if not my_parties: 
+            return await interaction.followup.send("참여 중인 고정 파티가 없습니다.", ephemeral=True)
+        
+        view = PartyActionSelectView(self, interaction.user.id, my_parties, action_type='edit_self')
+        await interaction.followup.send(f"✏️ **내 일정 수정**\n일정을 수정할 고정 파티를 선택해주세요.", view=view, ephemeral=True)
 
     async def _execute_vote(self, party_id, boss_name, channel_id):
+        # 전체 재투표 시에는 기존 기록을 모두 초기화합니다.
         self.c.execute('DELETE FROM vote_records WHERE party_id = ?', (party_id,))
         self.c.execute('INSERT OR REPLACE INTO vote_sessions (party_id, channel_id) VALUES (?, ?)', (party_id, channel_id))
         
@@ -588,13 +616,9 @@ class PartyScheduler(commands.Cog):
         for m_id in members:
             try:
                 user = self.bot.get_user(m_id) or await self.bot.fetch_user(m_id)
-                if cycle == 'bossMonthly':
-                    view = VoteDateSelectView(self, party_id, boss_name, m_id)
-                    msg = f"📢 **[{boss_name}] (월간) 일정 조율 투표가 시작되었습니다!**\n가장 먼저, 이번 달 레이드가 가능한 **날짜**를 모두 골라주세요."
-                else:
-                    view = VoteDaySelectView(self, party_id, boss_name, m_id)
-                    msg = f"📢 **[{boss_name}] 일정 조율 투표가 시작되었습니다!**\n가장 먼저, 이번 주 레이드가 가능한 **요일**을 모두 골라주세요."
-                await user.send(msg, view=view)
+                view = VoteDashboardView(self, party_id, boss_name, m_id, cycle, {})
+                embed = view.generate_embed()
+                await user.send(content=f"📢 **[{boss_name}] 일정 조율 투표가 시작되었습니다!**\n아래 패널의 버튼을 눌러 일정을 추가/수정해주세요.", embed=embed, view=view)
             except:
                 failed_members.append(f"<@{m_id}>")
                 
@@ -635,7 +659,13 @@ class PartyScheduler(commands.Cog):
         records = self.c.fetchall()
         
         if len(records) >= total_members:
-            self.c.execute('SELECT channel_id FROM vote_sessions WHERE party_id = ?', (party_id,))
+            # 💡 공지 채널을 vote_sessions 대신 parties와 guild_settings에서 가져와 세션에 구애받지 않고 언제든 알림을 보냅니다.
+            self.c.execute('SELECT guild_id, boss_name, cycle FROM parties WHERE party_id = ?', (party_id,))
+            party_info = self.c.fetchone()
+            if not party_info: return
+            guild_id, boss_name, cycle = party_info[0], party_info[1], (party_info[2] or 'bossWeekly')
+
+            self.c.execute('SELECT notice_channel_id FROM guild_settings WHERE guild_id = ?', (guild_id,))
             channel_row = self.c.fetchone()
             if not channel_row: return
             
@@ -643,11 +673,6 @@ class PartyScheduler(commands.Cog):
             if not channel:
                 try: channel = await self.bot.fetch_channel(channel_row[0])
                 except: return
-
-            self.c.execute('SELECT boss_name, cycle FROM parties WHERE party_id = ?', (party_id,))
-            party_info = self.c.fetchone()
-            boss_name = party_info[0]
-            cycle = party_info[1] if len(party_info) > 1 and party_info[1] else 'bossWeekly'
 
             all_votes = [json.loads(r[1]) for r in records]
             
@@ -683,9 +708,7 @@ class PartyScheduler(commands.Cog):
             
             await channel.send(content=mentions_text, embed=embed)
             
-            self.c.execute('DELETE FROM vote_sessions WHERE party_id = ?', (party_id,))
-            self.c.execute('DELETE FROM vote_records WHERE party_id = ?', (party_id,))
-            self.conn.commit()
+            # 💡 [핵심] 투표 완료 후에도 vote_records를 지우지 않아 이후 개별 수정 시 대응하게 만듭니다.
 
 async def setup(bot):
     await bot.add_cog(PartyScheduler(bot))
