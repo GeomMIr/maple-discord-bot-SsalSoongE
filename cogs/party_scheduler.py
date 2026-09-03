@@ -152,7 +152,7 @@ class VoteDaySelectView(discord.ui.View):
             self.cog.c.execute('SELECT user_id FROM party_members WHERE party_id = ?', (self.party_id,))
             for (m_id,) in self.cog.c.fetchall():
                 try:
-                    user = self.cog.bot.get_user(m_id) or await self.cog.bot.fetch_user(m_id)
+                    user = self.cog.bot.get_user(m_id) or await self.bot.fetch_user(m_id)
                     await user.send(f"⚠️ **[{self.boss_name}]** 파티의 일정 투표가 **1일**이 지나 만료되었습니다.\n투표가 완료되지 않아 세션이 종료되었으니, 디스코드 서버 채팅창에서 `/고정팟투표` 명령어를 입력해 재투표를 진행해주세요!")
                 except:
                     pass
@@ -273,7 +273,7 @@ class PartyMemberSelectView(discord.ui.View):
         self.add_item(self.select_item)
 
     async def member_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id: return await interaction.response.send_message("본인만 조작할 수 매습니다!", ephemeral=True)
+        if interaction.user.id != self.user_id: return await interaction.response.send_message("본인만 조작할 수 있습니다!", ephemeral=True)
         if self.select_item.values[0] == "error": return await interaction.response.send_message("⚠️ 멤버 목록을 불러올 수 없어 파티원을 선택할 수 없습니다.", ephemeral=True)
 
         selected_member_ids = [int(uid) for uid in self.select_item.values]
@@ -371,7 +371,6 @@ class PartyScheduler(commands.Cog):
         
         for party_id, boss_name, channel_id in parties:
             await self._execute_vote(party_id, boss_name, channel_id)
-
 
     async def _get_boss_list(self, api_key: str, char_name: str):
         headers = {"accept": "application/json", "x-nxopen-api-key": api_key}
@@ -481,10 +480,32 @@ class PartyScheduler(commands.Cog):
                 
         return failed_members
 
-    def format_time_range(self, time_str):
-        h = int(time_str.split(":")[0])
-        end_h = f"{str((h+1)%24).zfill(2)}:00" if h < 23 else "24:00"
-        return f"{time_str} ~ {end_h}"
+    def _merge_time_slots(self, time_list):
+        if len(time_list) == 24:
+            return "전부 (24시간 가능)"
+            
+        hours = sorted([int(t.split(":")[0]) for t in time_list])
+        if not hours: return ""
+
+        merged = []
+        start = hours[0]
+        prev = hours[0]
+
+        for h in hours[1:]:
+            if h == prev + 1:
+                prev = h
+            else:
+                end_hour = prev + 1
+                end_str = f"{str(end_hour).zfill(2)}:00" if end_hour < 24 else "24:00"
+                merged.append(f"{str(start).zfill(2)}:00 ~ {end_str}")
+                start = h
+                prev = h
+
+        end_hour = prev + 1
+        end_str = f"{str(end_hour).zfill(2)}:00" if end_hour < 24 else "24:00"
+        merged.append(f"{str(start).zfill(2)}:00 ~ {end_str}")
+
+        return ", ".join(merged)
 
     async def check_vote_completion(self, party_id):
         self.c.execute('SELECT COUNT(*) FROM party_members WHERE party_id = ?', (party_id,))
@@ -521,8 +542,8 @@ class PartyScheduler(commands.Cog):
                     common_times = common_times.intersection(set(vote[day]))
                 
                 if common_times:
-                    formatted_times = [self.format_time_range(t) for t in sorted(common_times)]
-                    results_text += f"\n🔹 **{day}요일**: " + ", ".join(formatted_times)
+                    merged_str = self._merge_time_slots(list(common_times))
+                    results_text += f"\n🔹 **{day}요일**: {merged_str}"
 
             embed = discord.Embed(title=f"📊 [{boss_name}] 고정팟 투표 결과", color=discord.Color.green())
             if results_text:
