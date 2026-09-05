@@ -17,14 +17,13 @@ class TimeSelectView(discord.ui.View):
         self.dashboard = dashboard
         self.targets = targets
 
-        base_times = dashboard.accumulated_data.get(targets[0], [])
-
+        # 💡 요일/날짜 세부 설정 시 기존 체크값을 불러오지 않고 항상 '빈 상태'로 시작하도록 변경했습니다.
         options = [discord.SelectOption(label="✅ 전부 (24시간 가능)", value="all")]
         for h in range(24):
             start = f"{str(h).zfill(2)}:00"
             end = f"{str((h+1)%24).zfill(2)}:00" if h < 23 else "24:00"
-            is_def = start in base_times
-            options.append(discord.SelectOption(label=f"{start} ~ {end}", value=start, default=is_def))
+            # default 속성 제거 (새로 선택 시 기존 데이터를 덮어씌움)
+            options.append(discord.SelectOption(label=f"{start} ~ {end}", value=start))
 
         self.sel = discord.ui.Select(
             placeholder=f"⏰ {title_context}에 가능한 시간을 선택 (복수 선택)", 
@@ -212,16 +211,27 @@ class VoteDashboardView(discord.ui.View):
                            (self.party_id, self.user_id, json.dumps(self.accumulated_data)))
         self.cog.conn.commit()
 
-        self.cog.c.execute('SELECT COUNT(*) FROM vote_records WHERE party_id = ?', (self.party_id,))
-        voted_count = self.cog.c.fetchone()[0]
         self.cog.c.execute('SELECT COUNT(*) FROM party_members WHERE party_id = ?', (self.party_id,))
         total_members = self.cog.c.fetchone()[0]
 
+        self.cog.c.execute('SELECT COUNT(*) FROM vote_records WHERE party_id = ?', (self.party_id,))
+        voted_count = self.cog.c.fetchone()[0]
+
         await interaction.response.edit_message(
-            content=f"🎉 **[{self.boss_name}] 투표가 완료되었습니다!**\n📊 현재 투표 현황: **{voted_count} / {total_members}명** 완료\n모든 파티원이 투표를 마치면 지정된 채널에 결과가 공지됩니다.",
+            content=f"🎉 **[{self.boss_name}] 투표가 완료되었습니다!**\n📊 현재 투표 현황: **{voted_count} / {total_members}명** 완료\n(전원 투표 완료 시 즉각 공지되며, 미완료 시 24시간 뒤 부분 결과가 공지됩니다.)",
             embed=None, view=None
         )
-        await self.cog.check_vote_completion(self.party_id)
+        
+        self.cog.c.execute('SELECT 1 FROM vote_sessions WHERE party_id = ?', (self.party_id,))
+        session_active = self.cog.c.fetchone()
+        
+        if session_active:
+            if voted_count >= total_members:
+                await self.cog.announce_results(self.party_id)
+                self.cog.c.execute('DELETE FROM vote_sessions WHERE party_id = ?', (self.party_id,))
+                self.cog.conn.commit()
+        else:
+            await self.cog.announce_results(self.party_id)
 
     async def on_timeout(self):
         pass
@@ -435,17 +445,21 @@ class PartyScheduler(commands.Cog):
         try:
             self.c.execute("ALTER TABLE parties ADD COLUMN cycle TEXT DEFAULT 'bossWeekly'")
             self.conn.commit()
-        except sqlite3.OperationalError:
-            pass 
+        except sqlite3.OperationalError: pass 
 
         try:
             self.c.execute("ALTER TABLE parties ADD COLUMN guild_id INTEGER")
             self.conn.commit()
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError: pass
 
         self.c.execute('''CREATE TABLE IF NOT EXISTS party_members (party_id INTEGER, user_id INTEGER, character_name TEXT, PRIMARY KEY (party_id, user_id))''')
         self.c.execute('''CREATE TABLE IF NOT EXISTS vote_sessions (party_id INTEGER PRIMARY KEY, channel_id INTEGER)''')
+        
+        try:
+            self.c.execute("ALTER TABLE vote_sessions ADD COLUMN created_at TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError: pass
+
         self.c.execute('''CREATE TABLE IF NOT EXISTS vote_records (party_id INTEGER, user_id INTEGER, available_times TEXT, PRIMARY KEY (party_id, user_id))''')
         self.c.execute('''CREATE TABLE IF NOT EXISTS guild_settings (guild_id INTEGER PRIMARY KEY, notice_channel_id INTEGER)''')
         self.conn.commit()
@@ -454,7 +468,24 @@ class PartyScheduler(commands.Cog):
     async def vote_task(self):
         kst = timezone(timedelta(hours=9))
         now = datetime.now(kst)
+        utc_now = datetime.now(timezone.utc)
         
+        self.c.execute('SELECT party_id, created_at FROM vote_sessions')
+        for row in self.c.fetchall():
+            party_id, created_at_str = row[0], row[1]
+            if not created_at_str:
+                self.c.execute('UPDATE vote_sessions SET created_at = ? WHERE party_id = ?', (utc_now.isoformat(), party_id))
+                self.conn.commit()
+                continue
+            
+            try:
+                created_at = datetime.fromisoformat(created_at_str)
+                if utc_now - created_at >= timedelta(hours=24):
+                    await self.announce_results(party_id)
+                    self.c.execute('DELETE FROM vote_sessions WHERE party_id = ?', (party_id,))
+                    self.conn.commit()
+            except ValueError: pass
+
         if now.weekday() == 3 and now.hour == 10 and now.minute == 0:
             if getattr(self, "last_weekly_vote_date", None) != now.date():
                 self.last_weekly_vote_date = now.date()
@@ -604,7 +635,9 @@ class PartyScheduler(commands.Cog):
 
     async def _execute_vote(self, party_id, boss_name, channel_id):
         self.c.execute('DELETE FROM vote_records WHERE party_id = ?', (party_id,))
-        self.c.execute('INSERT OR REPLACE INTO vote_sessions (party_id, channel_id) VALUES (?, ?)', (party_id, channel_id))
+        
+        now_str = datetime.now(timezone.utc).isoformat()
+        self.c.execute('INSERT OR REPLACE INTO vote_sessions (party_id, channel_id, created_at) VALUES (?, ?, ?)', (party_id, channel_id, now_str))
         
         self.c.execute('SELECT cycle FROM parties WHERE party_id = ?', (party_id,))
         cycle_row = self.c.fetchone()
@@ -653,61 +686,78 @@ class PartyScheduler(commands.Cog):
 
         return ", ".join(merged)
 
-    async def check_vote_completion(self, party_id):
-        self.c.execute('SELECT COUNT(*) FROM party_members WHERE party_id = ?', (party_id,))
-        total_members = self.c.fetchone()[0]
+    async def announce_results(self, party_id):
+        self.c.execute('SELECT guild_id, boss_name, cycle FROM parties WHERE party_id = ?', (party_id,))
+        party_info = self.c.fetchone()
+        if not party_info: return
+        guild_id, boss_name, cycle = party_info[0], party_info[1], (party_info[2] or 'bossWeekly')
+
+        self.c.execute('SELECT notice_channel_id FROM guild_settings WHERE guild_id = ?', (guild_id,))
+        channel_row = self.c.fetchone()
+        if not channel_row: return
+        
+        channel = self.bot.get_channel(channel_row[0])
+        if not channel:
+            try: channel = await self.bot.fetch_channel(channel_row[0])
+            except: return
+
+        self.c.execute('SELECT user_id FROM party_members WHERE party_id = ?', (party_id,))
+        total_members = [r[0] for r in self.c.fetchall()]
         
         self.c.execute('SELECT user_id, available_times FROM vote_records WHERE party_id = ?', (party_id,))
         records = self.c.fetchall()
         
-        if len(records) >= total_members:
-            self.c.execute('SELECT guild_id, boss_name, cycle FROM parties WHERE party_id = ?', (party_id,))
-            party_info = self.c.fetchone()
-            if not party_info: return
-            guild_id, boss_name, cycle = party_info[0], party_info[1], (party_info[2] or 'bossWeekly')
+        voted_users = [r[0] for r in records]
+        unvoted_users = [m for m in total_members if m not in voted_users]
+        
+        embed = discord.Embed(title=f"📊 [{boss_name}] 고정팟 투표 결과", color=discord.Color.green())
+        
+        if not records:
+            embed.description = "😢 투표 기한이 종료되었으나 아직 아무도 투표하지 않았습니다."
+            embed.color = discord.Color.red()
+            mentions_text = " ".join([f"<@{m}>" for m in unvoted_users])
+            await channel.send(content=f"⚠️ **[{boss_name}]** 투표 24시간이 경과했습니다!\n미투표자: {mentions_text}", embed=embed)
+            return
 
-            self.c.execute('SELECT notice_channel_id FROM guild_settings WHERE guild_id = ?', (guild_id,))
-            channel_row = self.c.fetchone()
-            if not channel_row: return
-            
-            channel = self.bot.get_channel(channel_row[0])
-            if not channel:
-                try: channel = await self.bot.fetch_channel(channel_row[0])
-                except: return
+        all_votes = [json.loads(r[1]) for r in records]
+        
+        common_days = set(all_votes[0].keys())
+        for vote in all_votes[1:]:
+            common_days = common_days.intersection(set(vote.keys()))
 
-            all_votes = [json.loads(r[1]) for r in records]
-            
-            common_days = set(all_votes[0].keys())
+        if cycle == 'bossMonthly':
+            sorted_days = sorted(common_days, key=lambda x: int(x.split("일")[0]) if "일" in x else 99)
+        else:
+            sorted_days = sorted(common_days, key=lambda x: {"월":0, "화":1, "수":2, "목":3, "금":4, "토":5, "일":6}.get(x, 99))
+
+        results_text = ""
+        for day in sorted_days:
+            common_times = set(all_votes[0][day])
             for vote in all_votes[1:]:
-                common_days = common_days.intersection(set(vote.keys()))
-
-            if cycle == 'bossMonthly':
-                sorted_days = sorted(common_days, key=lambda x: int(x.split("일")[0]) if "일" in x else 99)
-            else:
-                sorted_days = sorted(common_days, key=lambda x: {"월":0, "화":1, "수":2, "목":3, "금":4, "토":5, "일":6}.get(x, 99))
-
-            results_text = ""
-            for day in sorted_days:
-                common_times = set(all_votes[0][day])
-                for vote in all_votes[1:]:
-                    common_times = common_times.intersection(set(vote[day]))
-                
-                if common_times:
-                    merged_str = self._merge_time_slots(list(common_times))
-                    if cycle == 'bossMonthly':
-                        results_text += f"\n🔹 **{day}**: {merged_str}"
-                    else:
-                        results_text += f"\n🔹 **{day}요일**: {merged_str}"
-
-            embed = discord.Embed(title=f"📊 [{boss_name}] 고정팟 투표 결과", color=discord.Color.green())
-            if results_text:
-                embed.description = f"🎉 **파티원 전원이 가능한 시간대입니다!**\n{results_text}"
-            else:
-                embed.description = "😢 **파티원 전원이 공통으로 가능한 시간이 없습니다.**\n채널에서 다시 일정을 조율해 보세요!"
-
-            mentions_text = " ".join([f"<@{r[0]}>" for r in records])
+                common_times = common_times.intersection(set(vote[day]))
             
-            await channel.send(content=mentions_text, embed=embed)
+            if common_times:
+                merged_str = self._merge_time_slots(list(common_times))
+                if cycle == 'bossMonthly':
+                    results_text += f"\n🔹 **{day}**: {merged_str}"
+                else:
+                    results_text += f"\n🔹 **{day}요일**: {merged_str}"
+
+        if unvoted_users:
+            unvoted_mentions = ", ".join([f"<@{m}>" for m in unvoted_users])
+            desc_prefix = f"⏳ **일부 인원 투표 결과** (미투표자가 존재합니다)\n🚨 미투표자: {unvoted_mentions}\n*(미투표자가 `/내일정수정`으로 투표를 완료하면 결과가 갱신됩니다)*\n\n"
+            embed.color = discord.Color.orange()
+        else:
+            desc_prefix = "🎉 **파티원 전원이 투표를 완료했습니다!**\n\n"
+            embed.color = discord.Color.green()
+
+        if results_text:
+            embed.description = desc_prefix + "**[투표 인원 간 공통 가능 시간]**" + results_text
+        else:
+            embed.description = desc_prefix + "😢 **현재 투표한 인원 간에 공통으로 가능한 시간이 없습니다.**\n일정을 다시 조율해 보세요!"
+
+        mentions_text = " ".join([f"<@{m}>" for m in total_members])
+        await channel.send(content=mentions_text, embed=embed)
 
 async def setup(bot):
     await bot.add_cog(PartyScheduler(bot))
